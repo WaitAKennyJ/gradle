@@ -54,7 +54,7 @@ class ArtifactCollectionCodec(private val fileCollectionFactory: FileCollectionF
             when (it) {
                 is ResolvedArtifactResult -> it.file
                 is TransformationNode -> Callable { it.transformedSubject.get().files }
-                else -> throw IllegalArgumentException("Unexpected element ${it} in artifact collection")
+                else -> throw IllegalArgumentException("Unexpected element $it in artifact collection")
             }
         })
         val failures = readList() as List<Throwable>
@@ -118,7 +118,7 @@ class FixedArtifactCollection(
                 is TransformationNode -> {
                     // Ignore
                 }
-                else -> throw IllegalArgumentException("Unexpected element ${element} in artifact collection")
+                else -> throw IllegalArgumentException("Unexpected element $element in artifact collection")
             }
         }
         return result

@@ -16,15 +16,21 @@
 
 package org.gradle.api.internal.artifacts.transform;
 
+import org.gradle.api.artifacts.ResolveException;
 import org.gradle.api.artifacts.component.ComponentArtifactIdentifier;
+import org.gradle.api.internal.artifacts.ivyservice.DefaultLenientConfiguration;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.artifact.ResolvableArtifact;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.artifact.ResolvedArtifactSet;
 import org.gradle.api.internal.file.FileCollectionInternal;
 import org.gradle.api.internal.file.FileCollectionStructureVisitor;
+import org.gradle.api.internal.tasks.NodeExecutionContext;
+import org.gradle.internal.Try;
 import org.gradle.internal.operations.BuildOperationQueue;
 import org.gradle.internal.operations.RunnableBuildOperation;
 
+import javax.annotation.Nullable;
 import java.io.File;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Optional;
 
@@ -32,6 +38,8 @@ class TransformingAsyncArtifactListener implements ResolvedArtifactSet.AsyncArti
     private final Map<ComponentArtifactIdentifier, TransformationResult> artifactResults;
     private final ExecutionGraphDependenciesResolver dependenciesResolver;
     private final TransformationNodeRegistry transformationNodeRegistry;
+    @Nullable
+    private final NodeExecutionContext nodeExecutionContext;
     private final BuildOperationQueue<RunnableBuildOperation> actions;
     private final Transformation transformation;
 
@@ -40,13 +48,16 @@ class TransformingAsyncArtifactListener implements ResolvedArtifactSet.AsyncArti
         BuildOperationQueue<RunnableBuildOperation> actions,
         Map<ComponentArtifactIdentifier, TransformationResult> artifactResults,
         ExecutionGraphDependenciesResolver dependenciesResolver,
-        TransformationNodeRegistry transformationNodeRegistry
+        TransformationNodeRegistry transformationNodeRegistry,
+        @Nullable
+            NodeExecutionContext nodeExecutionContext
     ) {
         this.artifactResults = artifactResults;
         this.actions = actions;
         this.transformation = transformation;
         this.dependenciesResolver = dependenciesResolver;
         this.transformationNodeRegistry = transformationNodeRegistry;
+        this.nodeExecutionContext = nodeExecutionContext;
     }
 
     @Override
@@ -56,10 +67,19 @@ class TransformingAsyncArtifactListener implements ResolvedArtifactSet.AsyncArti
         if (node.isPresent()) {
             artifactResults.put(artifactId, new PrecomputedTransformationResult(node.get().getTransformedSubject()));
         } else {
-            File file = artifact.getFile();
+            File file;
+            try {
+                file = artifact.getFile();
+            } catch (ResolveException e) {
+                artifactResults.put(artifactId, new PrecomputedTransformationResult(Try.failure(e)));
+                return;
+            } catch (RuntimeException e) {
+                artifactResults.put(artifactId,
+                    new PrecomputedTransformationResult(Try.failure(new DefaultLenientConfiguration.ArtifactResolveException("artifacts", transformation.getDisplayName(), "artifact transform", Collections.singleton(e)))));
+                return;
+            }
             TransformationSubject initialSubject = TransformationSubject.initial(artifactId, file);
-            TransformationResult result = createTransformationResult(initialSubject);
-            artifactResults.put(artifactId, result);
+            createTransformationResult(artifact, initialSubject);
         }
     }
 
@@ -75,14 +95,13 @@ class TransformingAsyncArtifactListener implements ResolvedArtifactSet.AsyncArti
         return true;
     }
 
-    private TransformationResult createTransformationResult(TransformationSubject initialSubject) {
-        CacheableInvocation<TransformationSubject> invocation = transformation.createInvocation(initialSubject, dependenciesResolver, null);
-        return invocation.getCachedResult()
-            .<TransformationResult>map(PrecomputedTransformationResult::new)
-            .orElseGet(() -> {
-                TransformationOperation operation = new TransformationOperation(invocation, "Transform " + initialSubject.getDisplayName() + " with " + transformation.getDisplayName());
-                actions.add(operation);
-                return operation;
-            });
+    private void createTransformationResult(ResolvableArtifact artifact, TransformationSubject initialSubject) {
+        CacheableInvocation<TransformationSubject> invocation = transformation.createInvocation(initialSubject, dependenciesResolver, nodeExecutionContext);
+        if (invocation.getCachedResult().isPresent()) {
+            artifactResults.put(artifact.getId(), new PrecomputedTransformationResult(invocation.getCachedResult().get()));
+        } else {
+            TransformationOperation operation = new TransformationOperation(invocation, "Transform " + initialSubject.getDisplayName() + " with " + transformation.getDisplayName(), artifact.getId(), artifactResults);
+            actions.add(operation);
+        }
     }
 }
